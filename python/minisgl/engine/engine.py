@@ -35,17 +35,26 @@ def _align_up_32(num: int) -> int:
 
 class Engine:
     def __init__(self, config: EngineConfig):
+        """初始化推理引擎"""
         self.model_config = config.model_config
+        # 设置张量并行信息
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
 
         assert not torch.cuda.is_initialized()
+        # 初始化 CUDA 设备和流
         self.device = torch.device(f"cuda:{config.tp_info.rank}")
         torch.cuda.set_device(self.device)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
         self.dtype = config.dtype
 
+        # 初始化分布式通信（NCCL/gloo）
         self.tp_cpu_group = self._init_communication(config)
+
+        # 同步所有 TP rank 的内存状态。
+        # 该方法首先同步 CUDA 设备并清空缓存，获取当前空闲内存。
+        # 然后使用 all_reduce 获取所有 rank 的最小和最大内存。
+        # 如果发现最大和最小内存差异超过 2GB，则抛出异常，提示内存在 TP ranks 之间不平衡。
         init_free_memory = self._sync_get_memory()[1]
         logger.info_rank0(f"Free memory before loading model: {mem_GB(init_free_memory)}")
 
@@ -53,28 +62,40 @@ class Engine:
         set_rope_device(self.device)
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_path, config.model_config)
+        
+        # 加载模型权重
         self.model.load_state_dict(self._load_weight_state_dict(config))
+        
+        # 确定 KV 缓存页数（根据可用内存计算）
         self.num_pages = self.dummy_page = self._determine_num_pages(init_free_memory, config)
+
+
         self.kv_cache = create_kvcache(
             model_config=config.model_config,
             num_pages=self.num_pages + 1,  # +1 for dummy page
             device=self.device,
             dtype=self.dtype,
         )
+
         # NOTE: make page table 128 aligned (32 * sizeof(int32) == 128 bytes)
         self.max_seq_len = _align_up_32(min(config.max_seq_len, self.num_pages))
+
         self.page_table = create_page_table(  # + 1 for dummy request
             (config.max_running_req + 1, self.max_seq_len),
             device=self.device,
         )
+
         self.attn_backend = create_attention_backend(
             config.attention_backend,
             config.model_config,
             self.kv_cache,
             self.page_table,
         )
+
         self.ctx = Context(page_size=1, attn_backend=self.attn_backend)
         set_global_ctx(self.ctx)
+
+
         self.sampler = Sampler(self.device, self.model_config.vocab_size)
 
         post_free_memory = self._sync_get_memory()[0]
@@ -90,7 +111,10 @@ class Engine:
             sampling_params=None,  # type: ignore
             cache_handle=None,  # type: ignore
         )
+
         self.page_table[self.dummy_req.table_idx].fill_(self.dummy_page)
+
+
         self.graph_runner = GraphRunner(
             stream=self.stream,
             device=self.device,
@@ -166,16 +190,22 @@ class Engine:
 
     def _sync_get_memory(self) -> Tuple[int, int]:
         """Get the min and max free memory across TP ranks."""
+        """获取所有 TP rank 的最小和最大可用内存"""
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
+
         free_memory = get_free_memory(self.device)
+        
+        # 使用 all_reduce 获取所有 rank 的内存信息
         free_mem_tensor = torch.tensor([free_memory, -free_memory], device="cpu", dtype=torch.int64)
         torch.distributed.all_reduce(
             free_mem_tensor, op=torch.distributed.ReduceOp.MIN, group=self.tp_cpu_group
         )
         min_free_memory = int(free_mem_tensor[0].item())
         max_free_memory = -int(free_mem_tensor[1].item())
+
+        # 检查内存平衡
         if max_free_memory - min_free_memory > 2 * 1024 * 1024 * 1024:
             logger.error(
                 f"Memory across TP ranks are imbalanced:"
@@ -185,12 +215,16 @@ class Engine:
 
         return min_free_memory, max_free_memory
 
+    """执行批次的前向传播"""
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
         with self.ctx.forward_batch(batch):
+            # 判断是否可以使用 CUDA Graph
             if self.graph_runner.can_use_cuda_graph(batch):
+                # 使用 CUDA Graph 重放（更快）
                 logits = self.graph_runner.replay(batch)
             else:
+                # 正常前向传播
                 logits = self.model.forward()
 
         for req in batch.reqs:
@@ -200,6 +234,8 @@ class Engine:
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)
+
+        # 更新状态、采样、拷贝
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
 
     def shutdown(self) -> None:

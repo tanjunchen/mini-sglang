@@ -60,6 +60,7 @@ class Sampler:
         top_ks = [p.top_k if p.top_k >= 1 else self.vocab_size for p in params]
         top_ps = [min(max(p.top_p, MIN_P), 1.0) for p in params]
         temperatures = make_device_tensor(ts, torch.float32, self.device)
+        
         top_k, top_p = None, None
         if any(k != self.vocab_size for k in top_ks):
             top_k = make_device_tensor(top_ks, torch.int32, self.device)
@@ -69,6 +70,7 @@ class Sampler:
 
     @nvtx_annotate("Sampler")
     def sample(self, logits: torch.Tensor, args: BatchSamplingArgs) -> torch.Tensor:
+        """从 logits 采样生成 token"""
         with torch.cuda.nvtx.range("Sampler"):
             if args.temperatures is None:  # greedy sampling
                 return torch.argmax(logits, dim=-1)

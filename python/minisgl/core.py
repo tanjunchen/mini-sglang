@@ -10,7 +10,15 @@ if TYPE_CHECKING:
     from minisgl.attention import BaseAttnBackend, BaseAttnMetadata
     from minisgl.kvcache import BaseCacheHandle
 
-
+"""
+SamplingParams 类表示采样参数，包含 max_tokens（最大生成 token 数）、
+temperature（采样温度，0.0表示贪心，大于0.0表示随机）、
+top_p（nucleus 采样参数）、
+top_k（top-k 采样参数）、
+ignore_eos（是否忽略 EOS token）
+以及停止条件（stop 停止词列表、
+stop_token_ids 停止 token IDs 列表）。
+"""
 @dataclass
 class SamplingParams:
     temperature: float = 0.0
@@ -23,7 +31,13 @@ class SamplingParams:
     def is_greedy(self) -> bool:
         return (self.temperature <= 0.0 or self.top_k == 1) and self.top_p == 1.0
 
-
+"""
+Req 类表示一个推理请求，包含基本信息（uid 唯一标识符、input_ids 输入 token IDs 在 CPU 上、sampling_params 采样参数）、
+资源信息（table_idx 页表索引、cache_handle KV 缓存句柄）和状态信息（cached_len 已缓存的长度、output_len 需要生成的长度）。
+它提供了多个属性方法，包括 device_len（设备上的 token 数量，等于已缓存加已处理）、extend_len（需要扩展的长度，即本次前向传播处理的 token 数）
+和 remain_len（剩余需要生成的长度）。
+还提供了 complete_one 方法标记一个 token 已完成，以及 append_host 方法追加新生成的 token。
+"""
 @dataclass(eq=False)
 class Req:
     input_ids: torch.Tensor  # cpu tensor
@@ -65,7 +79,12 @@ class Req:
             f"max_device_len={self.max_device_len})"
         )
 
-
+"""
+Batch 类表示一组请求的批次，包含 reqs（请求列表）、input_ids（批次的 token IDs 拼接后）、
+out_loc（输出 KV cache 位置）和 attn_metadata（注意力元数据）。
+它提供了多个属性方法，包括 size（批次大小，即实际请求数）、padded_reqs（包含 padding 的请求列表，用于 CUDA Graph）和 
+has_prefill（是否包含 Prefill 请求）。
+"""
 @dataclass
 class Batch:
     reqs: List[Req]
@@ -93,7 +112,11 @@ class Batch:
     def padded_size(self) -> int:
         return len(self.padded_reqs)
 
-
+"""
+Context 类表示全局推理上下文，包含资源信息（page_size 页大小、kv_cache KV 缓存池、attn_backend 注意力后端、page_table 页表）
+和当前批次状态（batch 当前批次）。
+它提供了 forward_batch 上下文管理器方法设置当前批次。
+"""
 @dataclass
 class Context:
     page_size: int

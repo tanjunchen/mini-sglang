@@ -11,7 +11,9 @@ if TYPE_CHECKING:
     from minisgl.distributed import DistributedInfo
     from minisgl.kernel import PyNCCLCommunicator
 
-
+"""
+NCCL 主要用于 All-Reduce（聚合多个 GPU 的计算结果）和 All-Gather（收集多个 GPU 的数据）操作。
+"""
 @dataclass
 class DistributedImpl(ABC):
     @abstractmethod

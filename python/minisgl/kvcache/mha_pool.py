@@ -6,13 +6,16 @@ from minisgl.utils import divide_even
 
 from .base import BaseKVCache, KVCacheLayout
 
-
+"""
+KV 缓存系统负责存储和管理所有请求的 Key-Value 缓存，支持高效的缓存复用。
+"""
 class MHAKVCache(BaseKVCache):
     """
     Base class for key-value caches.
     This class defines the interface for key-value caches used in LLMs.
     """
 
+    """多头注意力 KV 缓存池"""
     def __init__(
         self,
         num_kv_heads: int,
@@ -26,6 +29,7 @@ class MHAKVCache(BaseKVCache):
         tp_info = get_tp_info()
         local_kv_heads = divide_even(num_kv_heads, tp_info.size)
         match kv_layout:
+            # 为每一层创建 KV 缓存
             case KVCacheLayout.PageFirst:
                 kv_buffer = torch.empty(
                     (2, num_pages, num_layers, local_kv_heads, head_dim),

@@ -8,7 +8,9 @@ import torch
 
 from .base import StateLessOP
 
-
+"""
+# RoPE（旋转位置编码）
+"""
 class RotaryEmbedding(StateLessOP):
     def __init__(
         self,

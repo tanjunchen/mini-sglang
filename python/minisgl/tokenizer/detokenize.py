@@ -10,6 +10,10 @@ from minisgl.message import DetokenizeMsg
 
 # Borrowed from sglang
 
+"""
+DetokenizeManager (位于 python/minisgl/tokenizer/detokenize.py) 的工作远比想象中复杂。
+它不能简单地把 ID 转为字符，因为存在 Unicode 分词问题（比如一个汉字可能由 3 个 Token 组成，只收到前 2 个时是乱码）。
+"""
 
 def _is_chinese_char(cp: int):
     """Checks whether CP is the codepoint of a CJK character."""
@@ -64,14 +68,24 @@ class DecodeStatus:
     sent_offset: int  # length of sent out string
 
 
+"""
+第三类是 Detokenizer Worker（单个进程），负责将模型生成的 token IDs 转换回文本，
+生成增量文本输出以支持流式响应。
+实现代码位于 detokenize.py。
+"""
 class DetokenizeManager:
     def __init__(self, tokenizer: LlamaTokenizer) -> None:
         # uid -> DecodeStatus
+        # 状态维护：decode_map 维护了每个请求的解码状态 (DecodeStatus)，包括已解码的 ID、已发送的字符串偏移量等。
         self.decode_map: Dict[int, DecodeStatus] = {}
         self.tokenizer = tokenizer
         self.eos_token_id = self.tokenizer.eos_token_id
 
     def detokenize(self, msgs: List[DetokenizeMsg]) -> List[str]:
+        """
+        它同时解码“当前所有 ID” (read_ids) 和“上一轮所有 ID” (surr_ids)，
+        通过字符串比对 (read_str[len(surr_str):]) 来找出新增的文本。
+        """
         read_ids: List[List[int]] = []
         surr_ids: List[List[int]] = []
         for msg in msgs:
@@ -97,6 +111,7 @@ class DetokenizeManager:
             s = self.decode_map[msg.uid]
             new_text = read_str[len(surr_str) :]
             # Streaming chunk: update the decode status
+            # 只有当新增文本不是乱码（）时，才认为解码成功
             if len(new_text) > 0 and not new_text.endswith("�"):
                 output_str = s.decoded_str + new_text
                 s.decoded_str = output_str

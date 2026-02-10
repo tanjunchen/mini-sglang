@@ -61,6 +61,12 @@ def validate_backend(backend: str):
     return backend
 
 
+"""
+注意力后端负责实际的注意力计算，支持不同的实现（FlashAttention、FlashInfer）以最大化性能。
+
+混合后端，即 Prefill 用 FlashAttention3，Decode 用 FlashInfer。
+创建注意力后端时，如果指定 “fa3,fi”，系统会创建一个混合后端，自动根据当前阶段选择最优的实现。
+"""
 def create_attention_backend(
     backend: str,
     config: ModelConfig,

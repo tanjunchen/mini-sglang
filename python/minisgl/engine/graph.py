@@ -44,7 +44,11 @@ def mem_GB(size: int) -> str:
 def get_free_memory(device: torch.device) -> int:
     return torch.cuda.mem_get_info(device)[0]
 
-
+"""
+GraphRunner 是 CUDA Graph 运行器，初始化时接收 stream、device、model、attn_backend、cuda_graph_bs 等参数。
+它为不同的 batch size 预捕获图，维护 graphs（batch_size -> CUDAGraph）、static_inputs（batch_size -> 静态输入）
+和 static_outputs（batch_size -> 静态输出）字典。初始化时会捕获所有 batch size 的图。
+"""
 class GraphRunner:
     def __init__(
         self,
@@ -70,6 +74,22 @@ class GraphRunner:
         self.dummy_req = dummy_req
         self.stream = stream
         self.device = device
+        """
+        为什么需要 CUDA Graph？ 
+        CUDA Kernel 启动存在隐藏成本。每次调用 CUDA kernel（如 matmul、attention）都需要 CPU 发出指令，每个 kernel 启动有 5-20μs 的 CPU 开销。
+        Transformer 模型的一次 forward pass 有 100+ 个 kernel 调用，总 CPU 开销达到 100 × 10μs = 1ms。
+
+        问题在 Decode 阶段尤为突出。
+        每次只生成 1 个 token，计算量很小（可能只需 2-3ms），CPU 启动开销占总时间的 25-50%。
+        小 batch size 时问题更严重（batch=1 时，计算可能只需 1ms，开销占 50%+）。
+
+        为什么不能用 Overlap Scheduling 解决？ 
+        Overlap Scheduling 只能隐藏”调度”开销，无法隐藏”kernel 启动”开销。
+        Kernel 启动发生在 GPU 计算过程中，必须串行执行。
+
+        CUDA Graph 通过捕获一系列 CUDA 操作并将其作为图（graph）重放，
+        减少 CPU-GPU 同步开销，显著提升 Decode 阶段的性能。
+        """
         self.graph_map = self._capture_graphs(max_seq_len, vocab_size, model)
 
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):

@@ -82,7 +82,10 @@ class FIMetadata(BaseAttnMetadata):
     def get_last_indices(self, bs: int) -> torch.Tensor:
         return self.cu_seqlens_q_gpu[1 : 1 + bs] - 1
 
-
+"""
+FlashInfer 专为 PagedAttention 优化，特别适合 Decode 阶段。
+它使用 FlashInfer 的 PagedAttention 实现，可以直接处理分页的 KV 缓存，避免了数据重组的开销。
+"""
 class FlashInferBackend(BaseAttnBackend):
     def __init__(
         self,

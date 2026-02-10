@@ -6,6 +6,9 @@ if TYPE_CHECKING:
     import torch
 
 
+"""
+// SiLU（Sigmoid Linear Unit）激活函数
+"""
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     from flashinfer import silu_and_mul
 

@@ -9,7 +9,9 @@ from minisgl.utils import divide_even
 
 from .base import BaseOP
 
-
+"""
+# 线性层（支持列并行/行并行）
+"""
 class _LinearTPImpl(BaseOP):
     """Real implementation of a linear layer with tensor parallelism."""
 

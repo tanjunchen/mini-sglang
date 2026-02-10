@@ -113,6 +113,11 @@ class RadixCacheManager(BaseCacheManager):
                 node.ref_count += 1
                 node = node.parent
 
+    """
+    Radix 的匹配不是一 token 一节点的 trie，而是“压缩过的 trie”：每个节点的 _key 可能是一段 token 序列。
+    因此匹配时需要计算“这一段 key 和输入序列能匹配多长”，如果只匹配了前半段，
+    就必须把节点从中间切开（split）再返回，这样树才能继续保持正确结构。
+    """
     def match_prefix(self, input_ids: torch.Tensor) -> Tuple[RadixCacheHandle, torch.Tensor]:
         node, prefix_len = self._walk(input_ids)
         if prefix_len == 0:

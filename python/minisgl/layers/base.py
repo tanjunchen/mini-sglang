@@ -11,7 +11,9 @@ _STATE_DICT: TypeAlias = Dict[str, torch.Tensor]
 def _concat_prefix(prefix: str, name: str) -> str:
     return f"{prefix}.{name}" if prefix else name
 
-
+"""
+# 基础类：BaseOP, StateLessOP, OPList
+"""
 class BaseOP:
     @abstractmethod
     def forward(self, *args: Any, **kwargs: Any) -> Any: ...

@@ -60,7 +60,10 @@ class Message(BaseModel):
     role: Literal["system", "user", "assistant"]
     content: str
 
-
+"""
+OpenAICompletionRequest 类，包含 messages（聊天消息列表，OpenAI 格式）、max_tokens（最大生成 token 数）、
+temperature（采样温度）和 stream（是否流式输出）等字段。
+"""
 class OpenAICompletionRequest(BaseModel):
     """Unified request model for OpenAI-style completions and chat-completions."""
 
@@ -99,11 +102,15 @@ class ModelList(BaseModel):
 @dataclass
 class FrontendManager:
     config: ServerArgs
+    # 两个 ZMQ 队列：一个发给 Tokenizer，一个从 Tokenizer 收
     send_tokenizer: ZmqAsyncPushQueue[BaseTokenizerMsg]
     recv_tokenizer: ZmqAsyncPullQueue[BaseFrontendMsg]
+    # uid_counter: 为每个请求生成唯一 ID
     uid_counter: int = 0
     initialized: bool = False
+    # ack_map: 存储收到的结果，Key 是 uid，Value 是结果列表
     ack_map: Dict[int, List[UserReply]] = field(default_factory=dict)
+    # event_map: 异步通知机制，Key 是 uid，Value 是 asyncio.Event
     event_map: Dict[int, asyncio.Event] = field(default_factory=dict)
 
     def new_user(self) -> int:
@@ -113,12 +120,16 @@ class FrontendManager:
         self.event_map[uid] = asyncio.Event()
         return uid
 
+    # 结果接收逻辑 (后台循环)
     async def listen(self):
         while True:
+            # 从 ZMQ 拉取消息 (这里会 await 直到有消息)
             msg = await self.recv_tokenizer.get()
             for msg in _unwrap_msg(msg):
+                # 收到消息后，放入对应的 ack_map
                 assert msg.uid in self.ack_map
                 self.ack_map[msg.uid].append(msg)
+                # 触发 Event，唤醒等待该 uid 的协程
                 self.event_map[msg.uid].set()
 
     def _create_listener_once(self):
@@ -126,25 +137,37 @@ class FrontendManager:
             asyncio.create_task(self.listen())
             self.initialized = True
 
+    # 1. 发送请求逻辑
     async def send_one(self, msg: BaseTokenizerMsg):
+        # 确保监听循环已启动
         self._create_listener_once()
+        # 非阻塞地推入 ZMQ 队列
         await self.send_tokenizer.put(msg)
 
+    # 3. 等待结果逻辑 (流式响应的核心)
     async def wait_for_ack(self, uid: int):
         event = self.event_map[uid]
 
         while True:
+            # 等待 listen() 函数触发 Event
             await event.wait()
+            # 清除标志，为下一次等待做准备
             event.clear()
 
+            # 取出所有积压的消息
             pending = self.ack_map[uid]
             self.ack_map[uid] = []
+
+            # 逐个 yield 出去
             ack = None
             for ack in pending:
                 yield ack
+
+            # 如果收到结束标志，跳出循环
             if ack and ack.finished:
                 break
-
+        
+        # 清理资源
         del self.ack_map[uid]
         del self.event_map[uid]
 
@@ -158,6 +181,7 @@ class FrontendManager:
 
     async def stream_chat_completions(self, uid: int):
         first_chunk = True
+        """生成 OpenAI 兼容的流式响应"""
         async for ack in self.wait_for_ack(uid):
             delta = {}
             if first_chunk:
@@ -166,6 +190,7 @@ class FrontendManager:
             if ack.incremental_output:
                 delta["content"] = ack.incremental_output
 
+            # 构建 OpenAI 格式的 chunk
             chunk = {
                 "id": f"cmpl-{uid}",
                 "object": "text_completion.chunk",
@@ -244,7 +269,9 @@ async def v1_root():
 
 @app.post("/v1/chat/completions")
 async def v1_completions(req: OpenAICompletionRequest):
+    """OpenAI 兼容的聊天完成端点"""
     state = get_global_state()
+    # 解析输入（支持 messages 或 prompt 格式）
     if req.messages:
         prompt = [msg.model_dump() for msg in req.messages]
     else:
@@ -252,7 +279,9 @@ async def v1_completions(req: OpenAICompletionRequest):
         prompt = req.prompt
 
     # TODO: support more sampling parameters
+    # 分配唯一的请求 ID
     uid = state.new_user()
+    # 创建 TokenizeMsg 并发送给 Tokenizer Worker
     await state.send_one(
         TokenizeMsg(
             uid=uid,
@@ -270,6 +299,7 @@ async def v1_completions(req: OpenAICompletionRequest):
     async def _abort():
         await state.abort_user(uid)
 
+    # 返回流式响应
     return StreamingResponse(
         state.stream_chat_completions(uid),
         media_type="text/event-stream",

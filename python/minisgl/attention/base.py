@@ -16,13 +16,24 @@ class BaseAttnMetadata(ABC):
     @abstractmethod
     def get_last_indices(self, bs: int) -> torch.Tensor: ...
 
-
+"""
+注意力计算的流程包括存储 KV 到缓存、从缓存读取 KV，以及计算注意力（Q @ K^T / sqrt(d) -> softmax -> @ V）
+"""
+"""注意力后端基类"""
 class BaseAttnBackend(ABC):
+    """
+    BaseAttnBackend 定义了注意力后端的基本接口，包括 forward 方法（执行注意力计算，
+    包括存储 KV 到缓存、从缓存读取 KV、计算注意力）、prepare_metadata 方法（准备注意力元数据）
+    和 begin_forward_decode 方法（开始 Decode 阶段前向传播）。
+    """
+
+    """执行注意力计算"""
     @abstractmethod
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_id: int, batch: Batch
     ) -> torch.Tensor: ...
 
+    """准备注意力元数据"""
     @abstractmethod
     def prepare_metadata(self, batch: Batch) -> None: ...
 

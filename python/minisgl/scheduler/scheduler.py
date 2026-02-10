@@ -40,22 +40,43 @@ class ForwardInput(NamedTuple):
 
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
+"""
+Scheduler 它的核心价值是“决策与编排”，本质是一层控制器，把上层的请求流转化为GPU每一轮的执行指令
 
+本轮推理执行prefill（前缀填充）还是decode（增量解码）；
+为当前批次请求分配多少KV页（KV pages）；
+请求结束后，如何将其KV数据转化为可复用的前缀缓存；
+
+Scheduler 的核心运行依赖主循环，mini-sglang默认采用overlap_loop，
+这也是它吞吐性能出色的关键——实现了“当前轮GPU前向计算”与“上一轮CPU处理/回包/资源释放”的流水线重叠，最大化硬件利用率。
+
+
+第四类是 Scheduler Workers（每个 GPU 一个），这是核心调度器，管理推理任务的调度和执行。
+每个 GPU 对应一个 Scheduler Worker（TP Rank），负责管理 Engine、KV 缓存和资源分配。
+实现代码位于 scheduler.py。
+"""
 class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from minisgl.engine import Engine
 
+        # 负责模型前向传播、注意力后端、CUDA图优化，以及最关键的物理KV缓存页和页表（page_table，KV页的索引入口）
         self.engine = Engine(config)
         # Initialize the I/O mixin
+        # 装配控制面通信：继承SchedulerIOMixin，通过super().__init__(config, self.engine.tp_cpu_group)
+        # 封装通信逻辑，包括rank0节点对外收发消息、多TP节点间的广播同步。
         super().__init__(config, self.engine.tp_cpu_group)
 
         # use another stream to overlap metadata processing with computation
         self.device = self.engine.device
+        # 两个 CUDA 流
         self.stream = torch.cuda.Stream(device=self.device)
         self.engine_stream_ctx = torch.cuda.stream(self.engine.stream)
         torch.cuda.set_stream(self.stream)
 
         # initialize other managers
+        # 初始化调度状态：整合TableManager、CacheManager、PrefillManager/DecodeManager三大模块。
+        # 其中，表结构（token_pool/page_table）承载GPU侧请求状态，CacheManager负责KV页的分配、复用与驱逐，
+        # Prefill/Decode管理器则负责将请求打包成批次（batch）。
         self.table_manager = TableManager(config.max_running_req, self.engine.page_table)
         self.cache_manager = CacheManager(self.device, self.engine.num_pages, config.cache_type)
         self.decode_manager = DecodeManager()
@@ -138,13 +159,20 @@ class Scheduler(SchedulerIOMixin):
             logger.error(f"Unknown message type: {type(msg)}")
             raise NotImplementedError
 
+    """
+    批次准备过程包括分配 KV 缓存页、准备元数据等操作
+    """
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
+        # 分配 KV 缓存页
         needed_size = sum(r.extend_len for r in batch.reqs)
         batch.out_loc = self.cache_manager.allocate(needed_size)
+        
         # NOTE: Pad the batch if needed
         if padding_size := self.engine.graph_runner.pad_batch(batch):
             batch.out_loc = F.pad(batch.out_loc, (0, padding_size), value=self.engine.dummy_page)
+        
         # NOTE: prepare 2d indices for token ids loading and writing
+        # 准备 token IDs 加载/写入索引
         load_indices = self._make_2d_indices(
             [(r.table_idx, r.cached_len, r.device_len) for r in batch.padded_reqs]
         )
@@ -160,7 +188,10 @@ class Scheduler(SchedulerIOMixin):
         )
         assert all(r.device_len < self.engine.max_seq_len for r in batch.reqs)
         # NOTE: write out_loc to page_table before `prepare_metadata`
+        # 写入页表
         self.page_table.view(-1)[load_indices] = batch.out_loc
+        
+        # 准备注意力元数据
         self.engine.attn_backend.prepare_metadata(batch)
         return ForwardInput(
             batch=batch,
@@ -169,8 +200,12 @@ class Scheduler(SchedulerIOMixin):
             write_indices=write_indices,
         )
 
+    """
+    而本轮执行prefill还是decode的策略，代码实现非常简洁，核心是“prefill优先”：
+    """
     def _schedule_next_batch(self) -> ForwardInput | None:
         # TODO: support other policies: e.g. DECODE first
+        # 优先调度 Prefill，然后调度 Decode
         batch = (
             self.prefill_manager.schedule_next_batch(self.prefill_budget)
             or self.decode_manager.schedule_next_batch()
@@ -230,7 +265,9 @@ class Scheduler(SchedulerIOMixin):
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
 
+
     def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:
+        """重叠调度循环：CPU 调度与 GPU 计算并行"""
         """
         The main loop of overlapping scheduling and execution.
 
@@ -242,16 +279,24 @@ class Scheduler(SchedulerIOMixin):
             or self.prefill_manager.runnable
             or self.decode_manager.runnable
         )
+        # 先通过receive_msg接收新请求，这是持续批处理（Continuous batching）的基础
         for msg in self.receive_msg(blocking=blocking):
+            # 接收新消息（非阻塞）
             self._process_one_msg(msg)
 
+        # 调用_schedule_next_batch组装下一轮执行的batch，调度下一个批次
         forward_input = self._schedule_next_batch()
         ongoing_data = None
+        # 在 Engine 流中执行推理（GPU 计算）
         if forward_input is not None:
+            # 一旦batch就绪，就在Engine的流上提交_forward任务，GPU开始执行本轮计算
             with self.engine_stream_ctx:  # run the batch in the engine's stream
                 self.engine.stream.wait_stream(self.stream)
                 ongoing_data = (forward_input, self._forward(forward_input))
 
+        # GPU运算的同时，CPU立刻回头执行_process_last_data，处理上一轮的输出token——判断请求是否结束、
+        # 向上游回包，同时回收已结束请求的资源，并将其KV数据回填缓存。
+        # 并行处理上一批次的结果（CPU 处理）
         self._process_last_data(last_data, ongoing_data)
         return ongoing_data
 
@@ -269,15 +314,18 @@ class Scheduler(SchedulerIOMixin):
 
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:
+        """调度器主循环"""
         if ENV.DISABLE_OVERLAP_SCHEDULING:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
+                # 普通模式：顺序执行
                 while True:
                     self.normal_loop()
         else:
             assert torch.cuda.current_stream() == self.stream
             data = None
             while True:
+                # 重叠调度模式：并行执行
                 data = self.overlap_loop(data)
 
     def shutdown(self) -> None:

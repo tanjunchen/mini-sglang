@@ -1,6 +1,8 @@
 import torch
 
-
+"""
+页表管理
+"""
 class TableManager:
     def __init__(self, max_running_reqs: int, page_table: torch.Tensor) -> None:
         self._max_running_reqs = max_running_reqs

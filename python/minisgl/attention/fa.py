@@ -35,7 +35,30 @@ class FAMetadata(BaseAttnMetadata):
     def get_last_indices(self, bs: int) -> torch.Tensor:
         return self.cu_seqlens_q[1 : 1 + bs] - 1
 
+"""
+标准注意力计算存在性能瓶颈。
+朴素实现需要先计算 scores = Q @ K.T / sqrt(d)，生成大矩阵 [seq_len, seq_len]，
+然后进行 attn = softmax(scores)，需要读写 HBM，最后计算 output = attn @ V，又一次 HBM 访问。
 
+这种方式的性能瓶颈在于需要存储完整的注意力矩阵（seq_len × seq_len），长序列时显存会爆炸。
+此外，多次 HBM（高带宽内存）读写成为瓶颈，而 HBM 带宽是限制因素而非计算能力。
+例如，对于 32K seq_len，FP16 注意力矩阵需要 2GB 显存。
+
+所有输入批次序列中的每个token 的大小与模型配置相关，并且是固定的。基于此，KV缓存的总大小可以用以下公式表示：
+2×B×L×H×D×P
+其中：
+* 2代表代表 Key/Value 两个向量，每层都需存储这两个向量。
+* B代表batch size。
+* L代表总序列长度，sequence length（输入序列+输出序列，或者说是提示 + 完成部分）。
+* H代表number of head。
+* D代表size of head，每个head的维度。
+* P代表kv的数据格式需要多少比特才能存储，即为每存放一个 KV Cache 数据所需的字节数。比如fp16就需要2 byte。
+
+
+FlashAttention 的优化包括使用 Tiling（将计算分块，只在 SRAM 即快速片上内存中进行）、Kernel Fusion（将多个操作融合，减少 HBM 访问）和 IO 优化（HBM 访问从 O(N²) 降低到 O(N)）。
+FlashAttention3 在 Hopper 架构上进一步优化，利用 Tensor Core 和新的异步执行单元，支持更大的 block size 以提高并行度。
+FlashAttention3 是 NVIDIA Hopper GPU (H100/H200) 上最快的注意力实现。
+"""
 class FlashAttentionBackend(BaseAttnBackend):
     def __init__(self, config: ModelConfig, kvcache: BaseKVCache, page_table: torch.Tensor):
         self.config = config

@@ -10,7 +10,9 @@ from minisgl.utils import divide_up, nvtx_annotate
 
 from .base import BaseOP
 
-
+"""
+# 词嵌入层（支持词表并行）
+"""
 class VocabParallelEmbedding(BaseOP):
     def __init__(
         self,
@@ -22,6 +24,7 @@ class VocabParallelEmbedding(BaseOP):
         tp_rank = tp_info.rank
         self.tp_size = tp_info.size
         self.num_embeddings = num_embeddings
+        # 计算当前 rank 负责的词表范围
         self.num_embeddings_tp = divide_up(num_embeddings, self.tp_size)
         start_idx = self.num_embeddings_tp * tp_rank
         finish_idx = min(start_idx + self.num_embeddings_tp, num_embeddings)
@@ -33,15 +36,19 @@ class VocabParallelEmbedding(BaseOP):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         from minisgl.kernel import indexing
 
+        # 自定义 indexing kernel（比 F.embedding 更快）
         y = indexing(
             weights=self.weight,
             indices=x,
             vocab_range=self.vocab_range if self.tp_size > 1 else None,
         )
 
+        # TP 模式下需要 all_reduce
         return self._comm.all_reduce(y) if self.tp_size > 1 else y
 
-
+"""
+语言模型头，支持权重共享
+"""
 class ParallelLMHead(VocabParallelEmbedding):
     def __init__(
         self,
@@ -89,12 +96,14 @@ class ParallelLMHead(VocabParallelEmbedding):
         ctx = get_global_ctx()
         batch = ctx.batch
         bs = batch.size
+        # Prefill 时只计算最后一个 token 的 logits
         if batch.is_prefill:
             indices = batch.attn_metadata.get_last_indices(bs)
             x = x[indices].contiguous()
             del indices
 
         module = self.tied_embedding or self
+        # 计算 logits
         logits = F.linear(x, module.weight, self.bias)
         if self.tp_size == 1:
             return logits

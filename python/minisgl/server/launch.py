@@ -36,14 +36,21 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
                 logger.info("Scheduler exiting gracefully...")
             scheduler.shutdown()
 
-
+"""
+核心进程：
+第一类是 API Server（FastAPI 进程），它作为前端入口接收用户的 HTTP 请求，
+提供 OpenAI 兼容的 API 接口（如 /v1/chat/completions），管理流式响应和请求生命周期。
+实现代码位于 api_server.py。
+"""
 def launch_server(run_shell: bool = False) -> None:
     from .api_server import run_api_server
     from .args import parse_args
 
+    # 解析命令行参数
     server_args, run_shell = parse_args(sys.argv[1:], run_shell)
     logger = init_logger(__name__, "initializer")
 
+    # 启动所有子进程
     def start_subprocess() -> None:
         import multiprocessing as mp
 
@@ -56,6 +63,7 @@ def launch_server(run_shell: bool = False) -> None:
         # so that we can guarantee all subprocesses are ready
         ack_queue: mp.Queue[str] = mp.Queue()
 
+        # 启动 Scheduler 进程（每个 GPU 一个）
         for i in range(world_size):
             new_args = replace(
                 server_args,
@@ -69,6 +77,8 @@ def launch_server(run_shell: bool = False) -> None:
             ).start()
 
         num_tokenizers = server_args.num_tokenizer
+        
+        # 启动 Detokenizer 进程
         # DeTokenizer, only 1
         mp.Process(
             target=tokenize_worker,
@@ -85,6 +95,9 @@ def launch_server(run_shell: bool = False) -> None:
             daemon=False,
             name="minisgl-detokenizer-0",
         ).start()
+
+
+        # 启动 Tokenizer 进程（多个）
         for i in range(num_tokenizers):
             mp.Process(
                 target=tokenize_worker,
@@ -110,6 +123,7 @@ def launch_server(run_shell: bool = False) -> None:
         for _ in range(num_tokenizers + 2):
             logger.info(ack_queue.get())
 
+    # 3. 启动 API 服务器（主进程）
     run_api_server(server_args, start_subprocess, run_shell=run_shell)
 
 

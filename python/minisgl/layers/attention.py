@@ -14,17 +14,19 @@ if TYPE_CHECKING:
     from minisgl.layers import RMSNorm
     from minisgl.models import RotaryConfig
 
-
+"""
+# 注意力层
+"""
 class AttentionLayer(StateLessOP):
     def __init__(
         self,
         layer_id: int,
-        num_qo_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
+        num_qo_heads: int, # Query/Output 头数
+        num_kv_heads: int, # KV 头数（用于 GQA/MQA）
+        head_dim: int,  # 头维度
         rotary_config: RotaryConfig,
-        q_norm: RMSNorm | None = None,
-        k_norm: RMSNorm | None = None,
+        q_norm: RMSNorm | None = None, # Q 归一化
+        k_norm: RMSNorm | None = None, # K 归一化
     ):
         assert num_qo_heads % num_kv_heads == 0
         self.layer_id = layer_id
@@ -47,13 +49,19 @@ class AttentionLayer(StateLessOP):
     def forward(self, qkv: torch.Tensor) -> torch.Tensor:
         ctx = get_global_ctx()
         metadata = ctx.batch.attn_metadata
+        # 分割 Q/K/V (输入 qkv 是 LinearQKVMerged 的输出)
         q, k, v = qkv.split([self.qo_attn_dim, self.kv_attn_dim, self.kv_attn_dim], dim=-1)
+        # Q/K 归一化（某些模型需要，如 Qwen2）
         if self.q_norm is not None:
             self.q_norm.forward_inplace(q.view(-1, self.num_qo_heads, self.head_dim))
         if self.k_norm is not None:
             self.k_norm.forward_inplace(k.view(-1, self.num_kv_heads, self.head_dim))
+        # 应用 RoPE（旋转位置编码）
         if self.rotary:
             q, k = self.rotary.forward(metadata.positions, q, k)
+        # 重塑形状为 [batch, heads, head_dim]
         q = q.view(-1, self.num_qo_heads, self.head_dim)
+        # 调用注意力后端
         o = ctx.attn_backend.forward(q, k, v, self.layer_id, ctx.batch)
+        # 重塑输出
         return o.view(-1, self.qo_attn_dim)

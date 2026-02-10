@@ -29,7 +29,9 @@ class ZmqPushQueue(Generic[T]):
         self.socket.close()
         self.context.term()
 
-
+"""
+异步发送队列
+"""
 class ZmqAsyncPushQueue(Generic[T]):
     def __init__(
         self,
@@ -50,7 +52,9 @@ class ZmqAsyncPushQueue(Generic[T]):
         self.socket.close()
         self.context.term()
 
-
+"""
+接收队列
+"""
 class ZmqPullQueue(Generic[T]):
     def __init__(
         self,
@@ -80,7 +84,9 @@ class ZmqPullQueue(Generic[T]):
         self.socket.close()
         self.context.term()
 
-
+"""
+异步接收队列
+"""
 class ZmqAsyncPullQueue(Generic[T]):
     def __init__(
         self,
@@ -101,7 +107,9 @@ class ZmqAsyncPullQueue(Generic[T]):
         self.socket.close()
         self.context.term()
 
-
+"""
+发送队列
+"""
 class ZmqPubQueue(Generic[T]):
     def __init__(
         self,

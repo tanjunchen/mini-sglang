@@ -4,7 +4,9 @@ import torch
 
 from .base import BaseOP
 
-
+"""
+# RMS Normalization
+"""
 class RMSNorm(BaseOP):
     def __init__(self, size: int, eps: float) -> None:
         from flashinfer import rmsnorm
