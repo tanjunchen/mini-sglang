@@ -44,6 +44,7 @@ class RotaryEmbedding(StateLessOP):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """应用 RoPE 位置编码（原地操作）"""
         self.apply_rope_with_cos_sin_cache_inplace(
             positions=positions,
             query=query,

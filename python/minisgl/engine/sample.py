@@ -27,6 +27,8 @@ def sample_impl(
     top_k: torch.Tensor | int | None,
     top_p: torch.Tensor | float | None,
 ) -> torch.Tensor:
+
+    # 使用 flashinfer 库进行高效采样
     import flashinfer.sampling as sampling
 
     probs = sampling.softmax(logits, temperatures, enable_pdl=is_sm90_supported())
@@ -42,6 +44,7 @@ def sample_impl(
         return sampling.top_p_sampling_from_probs(probs, top_p)
 
     assert top_k is not None and top_p is not None
+    # Top-k 和 Top-p 混合采样
     return sampling.top_k_top_p_sampling_from_probs(probs, top_k, top_p)
 
 
@@ -51,16 +54,21 @@ class Sampler:
     vocab_size: int
 
     def prepare(self, batch: Batch) -> BatchSamplingArgs:
+        """将 SamplingParams 转换为张量"""
         params = [r.sampling_params for r in batch.reqs]
+
+        # 处理贪婪解码特殊情况
         if all(p.is_greedy for p in params):
             return BatchSamplingArgs(temperatures=None)
 
+        # 边界值处理
         MIN_P = MIN_T = 1e-6
         ts = [max(0.0 if p.is_greedy else p.temperature, MIN_T) for p in params]
         top_ks = [p.top_k if p.top_k >= 1 else self.vocab_size for p in params]
         top_ps = [min(max(p.top_p, MIN_P), 1.0) for p in params]
         temperatures = make_device_tensor(ts, torch.float32, self.device)
         
+        # 创建 GPU 张量
         top_k, top_p = None, None
         if any(k != self.vocab_size for k in top_ks):
             top_k = make_device_tensor(top_ks, torch.int32, self.device)
@@ -73,5 +81,6 @@ class Sampler:
         """从 logits 采样生成 token"""
         with torch.cuda.nvtx.range("Sampler"):
             if args.temperatures is None:  # greedy sampling
+                # # 贪婪解码
                 return torch.argmax(logits, dim=-1)
             return sample_impl(logits.float(), args.temperatures, args.top_k, args.top_p)

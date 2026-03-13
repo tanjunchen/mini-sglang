@@ -18,11 +18,13 @@ from .sample import BatchSamplingArgs, Sampler
 
 logger = init_logger(__name__)
 
-
+# GPU → CPU 异步拷贝：next_tokens_gpu 在 GPU 上，next_tokens_cpu 在 CPU 上。
+# 异步拷贝避免阻塞 CPU。
+# 事件同步：copy_done_event 用于等待异步拷贝完成。
 class ForwardOutput(NamedTuple):
-    next_tokens_gpu: torch.Tensor
-    next_tokens_cpu: torch.Tensor
-    copy_done_event: torch.cuda.Event
+    next_tokens_gpu: torch.Tensor # GPU 上的 next token IDs
+    next_tokens_cpu: torch.Tensor # 同步到 CPU 的版本
+    copy_done_event: torch.cuda.Event # 异步拷贝完成事件
 
 
 def create_page_table(shape: Tuple[int, int], device: torch.device) -> torch.Tensor:
@@ -230,12 +232,24 @@ class Engine:
         for req in batch.reqs:
             req.complete_one()
 
+        # 采样得到下一个 token（注意切片和类型转换）
         next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
+        # 异步拷贝到 CPU
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
+        # 创建同步事件并记录到当前流
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)
 
+
+        """
+        CUDA Graph 条件判断：can_use_cuda_graph(batch) 检查是否为 Decode 阶段且 batch size 在预捕获范围内
+        Graph 重放 vs 正常推理：Decode 阶段使用 replay() 消除 Python 开销，Prefill 阶段正常执行 model.forward()
+        状态更新：每次推理后调用 req.complete_one() 更新请求的 cached_len 和 device_len
+        类型转换：采样结果转换为 int32 类型以节省内存
+        """
+
         # 更新状态、采样、拷贝
+        # Engine.forward_batch() 返回的不是简单的 logits，而是一个结构化的结果：
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
 
     def shutdown(self) -> None:

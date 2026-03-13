@@ -11,6 +11,10 @@ from .base import BaseLLMModel
 from .utils import GatedMLP as LlamaMLP
 from .utils import RopeAttn as LlamaAttn
 
+# 重要说明：
+# LlamaAttn 实际是 RopeAttn 的别名
+# LlamaMLP 是 GatedMLP 的别名，这是为了保持与 HuggingFace 命名的一致性。
+
 if TYPE_CHECKING:
     from .config import ModelConfig
 

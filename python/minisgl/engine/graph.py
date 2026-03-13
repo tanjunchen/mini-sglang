@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
+# 自动确定图形批次大小
 def _determine_cuda_graph_bs(
     cuda_graph_bs: List[int] | None,
     cuda_graph_max_bs: int | None,
@@ -50,6 +50,7 @@ GraphRunner 是 CUDA Graph 运行器，初始化时接收 stream、device、mode
 和 static_outputs（batch_size -> 静态输出）字典。初始化时会捕获所有 batch size 的图。
 """
 class GraphRunner:
+    # 实际构造函数参数更多，包括 stream, device, model, attn_backend 等
     def __init__(
         self,
         stream: torch.cuda.Stream,
@@ -93,6 +94,7 @@ class GraphRunner:
         self.graph_map = self._capture_graphs(max_seq_len, vocab_size, model)
 
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
+        
         graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
             logger.info_rank0("CUDA graph is disabled.")
@@ -103,6 +105,7 @@ class GraphRunner:
             dtype=torch.float32,
             device=self.device,
         )
+        """捕获不同 batch_size 的计算图"""
         self.attn_backend.init_capture_graph(max_seq_len=max_seq_len, bs_list=self.graph_bs_list)
 
         torch.cuda.synchronize(self.device)
@@ -140,15 +143,18 @@ class GraphRunner:
         return graph_map
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
+        """判断是否可以使用 CUDA Graph来捕获和重播计算图"""
         return batch.is_decode and batch.size <= self.max_graph_bs
 
     def replay(self, batch: Batch) -> torch.Tensor:
         assert self.can_use_cuda_graph(batch)
         g = self.graph_map[batch.padded_size]
         self.attn_backend.prepare_for_replay(batch)
+        """重放计算图"""
         g.replay()
         return self.logits[: batch.size]
 
+    # 填充批次至图形大小
     def pad_batch(self, batch: Batch) -> int:
         padded_size = (  # choose the first available batch size
             next(bs for bs in self.graph_bs_list if bs >= batch.size)
@@ -159,6 +165,7 @@ class GraphRunner:
         return batch.padded_size - batch.size
 
     # NOTE: This must be called before freeing NCCL resources to prevent program hang
+    # 销毁图形资源 
     def destroy_cuda_graphs(self) -> None:
         del self.graph_map
         gc.collect()

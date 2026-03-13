@@ -18,16 +18,22 @@ class MHAKVCache(BaseKVCache):
     """多头注意力 KV 缓存池"""
     def __init__(
         self,
-        num_kv_heads: int,
-        num_layers: int,
-        head_dim: int,
-        num_pages: int,
-        dtype: torch.dtype,
-        kv_layout: KVCacheLayout,
-        device: torch.device,
+        num_kv_heads: int,  # KV 头总数（模型定义）
+        num_layers: int, # 层数
+        head_dim: int, # 每头维度
+        num_pages: int,  # 页面数
+        dtype: torch.dtype, # 数据类型（如 torch.float16）
+        kv_layout: KVCacheLayout, # 存储布局
+        device: torch.device,  # 设备（GPU）
     ):
+        # 在张量并行环境下，每个 GPU 只负责一部分 KV 头
         tp_info = get_tp_info()
+        
+        # 在张量并行（Tensor Parallelism）环境下，KV 头会被均匀分配到多个 GPU 上。
+        # 每个 GPU 只负责存储和处理 local_kv_heads = num_kv_heads / tp_size 个 KV 头。
+        # get_tp_info() 获取当前进程的张量并行信息，divide_even 确保均匀分配。
         local_kv_heads = divide_even(num_kv_heads, tp_info.size)
+        
         match kv_layout:
             # 为每一层创建 KV 缓存
             case KVCacheLayout.PageFirst:
